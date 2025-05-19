@@ -1,48 +1,48 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::rc::Rc;
 
 use anyhow::{Context, Result};
 use clang::{Entity, EntityKind, Index, TranslationUnit};
 use petgraph::dot::{Config, Dot};
 use petgraph::graph::{DiGraph, NodeIndex};
-use petgraph::visit::EdgeRef as VisitEdgeRef;
-use regex::Regex;
 use structopt::StructOpt;
 use serde_json::{json, Value};
+
+#[derive(Debug, Clone, PartialEq)]
+enum NodeType {
+    Function,
+    Main,
+    Parameter,
+    BufferParameter,
+    Variable,
+    Call,
+    UnsafeCall,
+    BasicBlock,
+    IfStatement,
+    ForLoop,
+    WhileLoop,
+}
 
 #[derive(Debug, Clone)]
 struct Node {
     name: String,
     kind: NodeType,
-    source_location: Option<String>,
+    line: Option<usize>,
 }
 
-#[derive(Debug, PartialEq, Clone)]
-enum NodeType {
-    Function,
-    Variable,
-    Parameter,
-    Call,
-    UnsafeCall,
-    BufferParam,
-    BasicBlock,
-    Main,
+#[derive(Debug, Clone, PartialEq)]
+enum EdgeType {
+    Contains,
+    Calls,
+    Controls,
+    Uses,
+    Defines,
 }
 
 #[derive(Debug)]
 struct Edge {
     kind: EdgeType,
-}
-
-#[derive(Debug, PartialEq, Clone)]
-enum EdgeType {
-    Calls,
-    Contains,
-    Uses,
-    Defines,
-    Controls,
 }
 
 #[derive(Debug, StructOpt)]
@@ -57,12 +57,8 @@ struct Opt {
     output: Option<PathBuf>,
     
     /// Output format (json or dot)
-    #[structopt(short, long, default_value = "json")]
+    #[structopt(short, long, default_value = "dot")]
     format: String,
-    
-    /// Output simplified graph (only show functions)
-    #[structopt(short, long)]
-    simplified: bool,
 }
 
 fn main() -> Result<()> {
@@ -82,21 +78,19 @@ fn main() -> Result<()> {
     // Build our graph
     let mut graph = DiGraph::<Node, Edge>::new();
     let mut node_map: HashMap<String, NodeIndex> = HashMap::new();
+    let mut processed_entities = HashSet::new();
     
     // Get the root cursor from the translation unit
     let entity = tu.get_entity();
     
     // Process the AST
-    process_entity(entity, &mut graph, &mut node_map, &content);
-    
-    // Check for unsafe functions
-    mark_unsafe_functions(&mut graph, &node_map);
+    analyze_program(entity, &mut graph, &mut node_map, &mut processed_entities, &content);
     
     // Generate the output based on selected format
     let output = if opt.format == "json" {
         format_graph_as_json(&graph)
     } else {
-        format_graph_as_dot(&graph, opt.simplified)
+        format_graph_as_dot(&graph)
     };
     
     // Write to file or stdout
@@ -111,190 +105,601 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn process_entity(
+fn analyze_program(
     entity: Entity,
     graph: &mut DiGraph<Node, Edge>,
     node_map: &mut HashMap<String, NodeIndex>,
+    processed: &mut HashSet<String>,
     content: &str,
 ) {
+    // Skip system headers and already processed entities
+    if is_system_entity(&entity) {
+        return;
+    }
+    
+    let entity_id = get_entity_id(&entity);
+    if processed.contains(&entity_id) {
+        return;
+    }
+    
+    processed.insert(entity_id);
+    
     match entity.get_kind() {
         EntityKind::FunctionDecl => {
-            // Process function
-            let name = entity.get_name().unwrap_or_else(|| "unknown_function".to_string());
-            let is_main = name == "main";
-            
-            let location = get_entity_location(&entity);
-            
-            let node_type = if is_main { NodeType::Main } else { NodeType::Function };
-            
-            let node_idx = graph.add_node(Node {
-                name: name.clone(),
-                kind: node_type,
-                source_location: location.clone(),
-            });
-            
-            node_map.insert(name.clone(), node_idx);
-            
-            // Process function parameters
-            for param in entity.get_arguments().unwrap_or_default() {
-                let param_name = param.get_name().unwrap_or_else(|| "unnamed_param".to_string());
-                let param_type = param.get_type().unwrap();
-                let type_str = param_type.get_display_name();
-                
-                // Check if this is a buffer parameter (char* or similar)
-                let is_buffer = type_str.contains("char *") || type_str.contains("char*");
-                
-                let param_node_idx = graph.add_node(Node {
-                    name: param_name.clone(),
-                    kind: if is_buffer { NodeType::BufferParam } else { NodeType::Parameter },
-                    source_location: get_entity_location(&param),
-                });
-                
-                node_map.insert(format!("{}_{}", name, param_name), param_node_idx);
-                
-                // Add edge from function to parameter
-                graph.add_edge(
-                    node_idx,
-                    param_node_idx,
-                    Edge { kind: EdgeType::Contains },
-                );
-            }
-            
-            // Process function body (for getting call graph)
-            if let Some(body) = entity.get_children().iter().find(|c| c.get_kind() == EntityKind::CompoundStmt) {
-                process_function_body(body, node_idx, graph, node_map, content);
-            }
-        }
+            process_function(entity, graph, node_map, processed, content);
+        },
         EntityKind::VarDecl => {
-            // Process variable declaration
-            if let Some(name) = entity.get_name() {
-                let node_idx = graph.add_node(Node {
-                    name: name.clone(),
-                    kind: NodeType::Variable,
-                    source_location: get_entity_location(&entity),
-                });
-                
-                node_map.insert(name, node_idx);
-            }
-        }
+            process_variable(entity, graph, node_map);
+        },
+        EntityKind::IfStmt => {
+            process_if_statement(entity, graph, node_map, processed, content);
+        },
+        EntityKind::ForStmt => {
+            process_loop(entity, graph, node_map, processed, content, NodeType::ForLoop);
+        },
+        EntityKind::WhileStmt => {
+            process_loop(entity, graph, node_map, processed, content, NodeType::WhileLoop);
+        },
         _ => {
             // Recursively process children
             for child in entity.get_children() {
-                process_entity(child, graph, node_map, content);
+                analyze_program(child, graph, node_map, processed, content);
             }
         }
     }
 }
 
-fn process_function_body(
-    body: &Entity,
-    function_idx: NodeIndex,
+fn process_function(
+    entity: Entity,
     graph: &mut DiGraph<Node, Edge>,
     node_map: &mut HashMap<String, NodeIndex>,
+    processed: &mut HashSet<String>,
     content: &str,
 ) {
-    // Create a basic block for the function body
-    let bb_idx = graph.add_node(Node {
-        name: "entry".to_string(),
-        kind: NodeType::BasicBlock,
-        source_location: get_entity_location(body),
-    });
-    
-    graph.add_edge(
-        function_idx,
-        bb_idx,
-        Edge { kind: EdgeType::Contains },
-    );
-    
-    // Find all function calls within the body
-    find_function_calls(body, bb_idx, graph, node_map, content);
-}
-
-fn find_function_calls(
-    entity: &Entity,
-    parent_idx: NodeIndex,
-    graph: &mut DiGraph<Node, Edge>,
-    node_map: &mut HashMap<String, NodeIndex>,
-    content: &str,
-) {
-    if entity.get_kind() == EntityKind::CallExpr {
-        // This is a function call
-        if let Some(called_entity) = entity.get_reference() {
-            if let Some(called_name) = called_entity.get_name() {
-                // Create a node for this function call
-                let call_idx = graph.add_node(Node {
-                    name: called_name.clone(),
-                    kind: NodeType::Call,
-                    source_location: get_entity_location(entity),
+    if let Some(name) = entity.get_name() {
+        let is_main = name == "main";
+        let line = get_line_number(&entity);
+        
+        // Create node for the function
+        let node_type = if is_main { NodeType::Main } else { NodeType::Function };
+        let node_idx = graph.add_node(Node {
+            name: name.clone(),
+            kind: node_type,
+            line,
+        });
+        
+        node_map.insert(name.clone(), node_idx);
+        
+        // Process function parameters
+        for param in entity.get_arguments().unwrap_or_default() {
+            if let Some(param_name) = param.get_name() {
+                let param_type = param.get_type().unwrap().get_display_name();
+                let is_buffer = param_type.contains("char *") || param_type.contains("char*");
+                
+                let node_type = if is_buffer { 
+                    NodeType::BufferParameter 
+                } else { 
+                    NodeType::Parameter 
+                };
+                
+                let param_label = if is_buffer {
+                    format!("BufferParam: {} ({})", param_name, param_type)
+                } else {
+                    format!("Param: {} ({})", param_name, param_type)
+                };
+                
+                let param_idx = graph.add_node(Node {
+                    name: param_label,
+                    kind: node_type,
+                    line: get_line_number(&param),
                 });
                 
-                // Add edge from parent to call
+                // Add edge from function to parameter
                 graph.add_edge(
-                    parent_idx,
-                    call_idx,
+                    node_idx,
+                    param_idx,
                     Edge { kind: EdgeType::Contains },
                 );
                 
-                // If the called function is in our node map, add an edge
-                if let Some(&called_idx) = node_map.get(&called_name) {
-                    graph.add_edge(
-                        call_idx,
-                        called_idx,
-                        Edge { kind: EdgeType::Calls },
-                    );
+                // Store parameter in node map for later reference
+                node_map.insert(format!("{}_{}", name, param_name), param_idx);
+            }
+        }
+        
+        // Process function body
+        if let Some(body) = entity.get_children().iter().find(|c| c.get_kind() == EntityKind::CompoundStmt) {
+            // Create a basic block for the function body
+            let bb_idx = graph.add_node(Node {
+                name: "BasicBlock: entry".to_string(),
+                kind: NodeType::BasicBlock,
+                line: get_line_number(body),
+            });
+            
+            // Connect function to basic block
+            graph.add_edge(
+                node_idx,
+                bb_idx,
+                Edge { kind: EdgeType::Contains },
+            );
+            
+            // Process body contents
+            for child in body.get_children() {
+                process_statement(child, bb_idx, graph, node_map, processed, content);
+            }
+        }
+    }
+}
+
+fn process_statement(
+    entity: Entity,
+    parent_idx: NodeIndex,
+    graph: &mut DiGraph<Node, Edge>,
+    node_map: &mut HashMap<String, NodeIndex>,
+    processed: &mut HashSet<String>,
+    content: &str,
+) {
+    match entity.get_kind() {
+        EntityKind::CallExpr => {
+            process_call_expression(entity, parent_idx, graph, node_map);
+        },
+        EntityKind::DeclStmt => {
+            // Handle local variable declarations
+            for child in entity.get_children() {
+                if child.get_kind() == EntityKind::VarDecl {
+                    process_variable(child, graph, node_map);
+                    
+                    if let Some(var_name) = child.get_name() {
+                        if let Some(&var_idx) = node_map.get(&var_name) {
+                            // Connect parent to variable
+                            graph.add_edge(
+                                parent_idx,
+                                var_idx,
+                                Edge { kind: EdgeType::Contains },
+                            );
+                        }
+                    }
+                }
+            }
+        },
+        EntityKind::IfStmt => {
+            let if_idx = process_if_statement(entity, graph, node_map, processed, content);
+            
+            // Connect parent to if statement
+            if let Some(idx) = if_idx {
+                graph.add_edge(
+                    parent_idx,
+                    idx,
+                    Edge { kind: EdgeType::Contains },
+                );
+            }
+        },
+        EntityKind::ForStmt => {
+            let loop_idx = process_loop(entity, graph, node_map, processed, content, NodeType::ForLoop);
+            
+            // Connect parent to for loop
+            if let Some(idx) = loop_idx {
+                graph.add_edge(
+                    parent_idx,
+                    idx,
+                    Edge { kind: EdgeType::Contains },
+                );
+            }
+        },
+        EntityKind::WhileStmt => {
+            let loop_idx = process_loop(entity, graph, node_map, processed, content, NodeType::WhileLoop);
+            
+            // Connect parent to while loop
+            if let Some(idx) = loop_idx {
+                graph.add_edge(
+                    parent_idx,
+                    idx,
+                    Edge { kind: EdgeType::Contains },
+                );
+            }
+        },
+        EntityKind::CompoundStmt => {
+            // Process nested blocks
+            for child in entity.get_children() {
+                process_statement(child, parent_idx, graph, node_map, processed, content);
+            }
+        },
+        _ => {
+            // Process other statement types or recurse into children
+            for child in entity.get_children() {
+                process_statement(child, parent_idx, graph, node_map, processed, content);
+            }
+        }
+    }
+}
+
+fn process_call_expression(
+    entity: Entity,
+    parent_idx: NodeIndex,
+    graph: &mut DiGraph<Node, Edge>,
+    node_map: &mut HashMap<String, NodeIndex>,
+) {
+    if let Some(called_entity) = entity.get_reference() {
+        if let Some(function_name) = called_entity.get_name() {
+            let is_unsafe = is_unsafe_function(&function_name);
+            
+            // Create node for the function call
+            let node_type = if is_unsafe { 
+                NodeType::UnsafeCall 
+            } else { 
+                NodeType::Call 
+            };
+            
+            let call_label = if is_unsafe {
+                format!("Unsafe: {}", function_name)
+            } else {
+                format!("Call: {}", function_name)
+            };
+            
+            let call_idx = graph.add_node(Node {
+                name: call_label,
+                kind: node_type,
+                line: get_line_number(&entity),
+            });
+            
+            // Connect parent to call
+            graph.add_edge(
+                parent_idx,
+                call_idx,
+                Edge { kind: EdgeType::Contains },
+            );
+            
+            // Connect call to the actual function if it exists in our graph
+            if let Some(&func_idx) = node_map.get(&function_name) {
+                graph.add_edge(
+                    call_idx,
+                    func_idx,
+                    Edge { kind: EdgeType::Calls },
+                );
+            }
+            
+            // For unsafe calls, create another node that controls this one
+            if is_unsafe {
+                let unsafe_idx = graph.add_node(Node {
+                    name: format!("Unsafe: {}", function_name),
+                    kind: NodeType::UnsafeCall,
+                    line: None,
+                });
+                
+                graph.add_edge(
+                    unsafe_idx,
+                    call_idx,
+                    Edge { kind: EdgeType::Controls },
+                );
+            }
+            
+            // Process call arguments to track data flow
+            for (i, arg) in entity.get_arguments().unwrap_or_default().iter().enumerate() {
+                process_call_argument(arg, call_idx, graph, node_map);
+            }
+        }
+    }
+}
+
+fn process_call_argument(
+    arg: &Entity,
+    call_idx: NodeIndex,
+    graph: &mut DiGraph<Node, Edge>,
+    node_map: &mut HashMap<String, NodeIndex>,
+) {
+    // Try to find references to variables/parameters in the argument
+    let mut current = arg.clone();
+    
+    // Traverse through the AST looking for variable references
+    loop {
+        match current.get_kind() {
+            EntityKind::DeclRefExpr => {
+                if let Some(var_name) = current.get_name() {
+                    // Try to find this variable in our node map
+                    if let Some(&var_idx) = node_map.get(&var_name) {
+                        // Add "uses" edge
+                        graph.add_edge(
+                            call_idx,
+                            var_idx,
+                            Edge { kind: EdgeType::Uses },
+                        );
+                    }
+                }
+                break;
+            },
+            _ => {
+                // Check if there are any children to traverse
+                let children = current.get_children();
+                if children.is_empty() {
+                    break;
+                }
+                // Just take the first child for simplicity
+                current = children[0].clone();
+            }
+        }
+    }
+}
+
+fn process_variable(
+    entity: Entity,
+    graph: &mut DiGraph<Node, Edge>,
+    node_map: &mut HashMap<String, NodeIndex>,
+) {
+    if let Some(name) = entity.get_name() {
+        let var_type = entity.get_type().unwrap().get_display_name();
+        let is_buffer = var_type.contains("char *") || var_type.contains("char*");
+        
+        let node_type = if is_buffer { 
+            NodeType::BufferParameter 
+        } else { 
+            NodeType::Variable 
+        };
+        
+        let var_label = if is_buffer {
+            format!("BufferParam: {} ({})", name, var_type)
+        } else {
+            format!("Var: {}", name)
+        };
+        
+        let var_idx = graph.add_node(Node {
+            name: var_label,
+            kind: node_type,
+            line: get_line_number(&entity),
+        });
+        
+        node_map.insert(name, var_idx);
+    }
+}
+
+fn process_if_statement(
+    entity: Entity,
+    graph: &mut DiGraph<Node, Edge>,
+    node_map: &mut HashMap<String, NodeIndex>,
+    processed: &mut HashSet<String>,
+    content: &str,
+) -> Option<NodeIndex> {
+    let if_idx = graph.add_node(Node {
+        name: "If statement".to_string(),
+        kind: NodeType::IfStatement,
+        line: get_line_number(&entity),
+    });
+    
+    // Process the condition (to track variable uses)
+    if let Some(cond) = entity.get_children().iter().find(|c| c.get_kind() == EntityKind::BinaryOperator) {
+        for child in cond.get_children() {
+            if child.get_kind() == EntityKind::DeclRefExpr {
+                if let Some(var_name) = child.get_name() {
+                    if let Some(&var_idx) = node_map.get(&var_name) {
+                        graph.add_edge(
+                            if_idx,
+                            var_idx,
+                            Edge { kind: EdgeType::Uses },
+                        );
+                    }
                 }
             }
         }
     }
     
-    // Recursively process children
+    // Process the then branch
+    if let Some(then_branch) = entity.get_children().iter().find(|c| c.get_kind() == EntityKind::CompoundStmt) {
+        let then_bb_idx = graph.add_node(Node {
+            name: "BasicBlock: then".to_string(),
+            kind: NodeType::BasicBlock,
+            line: get_line_number(then_branch),
+        });
+        
+        graph.add_edge(
+            if_idx,
+            then_bb_idx,
+            Edge { kind: EdgeType::Contains },
+        );
+        
+        for child in then_branch.get_children() {
+            process_statement(child, then_bb_idx, graph, node_map, processed, content);
+        }
+    }
+    
+    // Process the else branch if it exists
+    let children = entity.get_children();
+    if children.len() >= 3 {
+        let else_branch = &children[2];
+        if else_branch.get_kind() == EntityKind::CompoundStmt {
+            let else_bb_idx = graph.add_node(Node {
+                name: "BasicBlock: else".to_string(),
+                kind: NodeType::BasicBlock,
+                line: get_line_number(else_branch),
+            });
+            
+            graph.add_edge(
+                if_idx,
+                else_bb_idx,
+                Edge { kind: EdgeType::Contains },
+            );
+            
+            for child in else_branch.get_children() {
+                process_statement(child, else_bb_idx, graph, node_map, processed, content);
+            }
+        }
+    }
+    
+    Some(if_idx)
+}
+
+fn process_loop(
+    entity: Entity,
+    graph: &mut DiGraph<Node, Edge>,
+    node_map: &mut HashMap<String, NodeIndex>,
+    processed: &mut HashSet<String>,
+    content: &str,
+    loop_type: NodeType,
+) -> Option<NodeIndex> {
+    let loop_name = match loop_type {
+        NodeType::ForLoop => "For loop",
+        NodeType::WhileLoop => "While loop",
+        _ => "Loop",
+    };
+    
+    let loop_idx = graph.add_node(Node {
+        name: loop_name.to_string(),
+        kind: loop_type,
+        line: get_line_number(&entity),
+    });
+    
+    // Process loop condition variables
     for child in entity.get_children() {
-        find_function_calls(&child, parent_idx, graph, node_map, content);
+        if child.get_kind() == EntityKind::BinaryOperator || 
+           child.get_kind() == EntityKind::DeclRefExpr {
+            for subchild in child.get_children() {
+                if subchild.get_kind() == EntityKind::DeclRefExpr {
+                    if let Some(var_name) = subchild.get_name() {
+                        if let Some(&var_idx) = node_map.get(&var_name) {
+                            graph.add_edge(
+                                loop_idx,
+                                var_idx,
+                                Edge { kind: EdgeType::Uses },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Process loop body
+    if let Some(body) = entity.get_children().iter().find(|c| c.get_kind() == EntityKind::CompoundStmt) {
+        let body_idx = graph.add_node(Node {
+            name: "BasicBlock: loop body".to_string(),
+            kind: NodeType::BasicBlock,
+            line: get_line_number(body),
+        });
+        
+        graph.add_edge(
+            loop_idx,
+            body_idx,
+            Edge { kind: EdgeType::Contains },
+        );
+        
+        for child in body.get_children() {
+            process_statement(child, body_idx, graph, node_map, processed, content);
+        }
+    }
+    
+    Some(loop_idx)
+}
+
+// Helper functions
+
+fn get_entity_id(entity: &Entity) -> String {
+    if let Some(name) = entity.get_name() {
+        if let Some(loc) = entity.get_location() {
+            let file = loc.get_file_location();
+            format!("{}:{}:{}", name, file.line, file.column)
+        } else {
+            name
+        }
+    } else {
+        format!("{:?}", entity.get_kind())
     }
 }
 
-fn mark_unsafe_functions(
-    graph: &mut DiGraph<Node, Edge>,
-    node_map: &HashMap<String, NodeIndex>,
-) {
-    // List of known unsafe functions
+fn is_system_entity(entity: &Entity) -> bool {
+    if let Some(loc) = entity.get_location() {
+        let file_path = loc.get_file_location().file
+            .map(|f| f.get_path())
+            .unwrap_or_default();
+        
+        let path_str = file_path.to_string_lossy();
+        path_str.contains("/usr/include/") || 
+        path_str.contains("/usr/lib/") ||
+        path_str.contains("/usr/local/include/")
+    } else {
+        false
+    }
+}
+
+fn is_unsafe_function(name: &str) -> bool {
     let unsafe_functions = [
         "strcpy", "strcat", "sprintf", "gets", "scanf", 
         "vsprintf", "memcpy", "memmove", "strncpy", "strncat",
     ];
     
-    // Clone the nodes to avoid borrow checker issues
-    let nodes: Vec<_> = graph.node_indices().collect();
+    unsafe_functions.contains(&name)
+}
+
+fn get_line_number(entity: &Entity) -> Option<usize> {
+    entity.get_location().map(|loc| {
+        let file_loc = loc.get_file_location();
+        file_loc.line as usize
+    })
+}
+
+// Output formatting functions
+
+fn format_graph_as_dot(graph: &DiGraph<Node, Edge>) -> String {
+    let mut output = String::from("digraph {\n");
     
-    for node_idx in nodes {
-        // Clone the relevant data instead of keeping a reference
-        let is_call = graph[node_idx].kind == NodeType::Call;
-        let node_name = graph[node_idx].name.clone();
+    // Add global styling
+    output.push_str("    graph [fontname=\"Arial\", rankdir=TB, splines=true];\n");
+    output.push_str("    node [fontname=\"Arial\"];\n");
+    output.push_str("    edge [fontname=\"Arial\"];\n\n");
+    
+    // Add nodes with different shapes based on type
+    for node_idx in graph.node_indices() {
+        let node = &graph[node_idx];
+        let node_id = node_idx.index();
         
-        // Check if this is a call to an unsafe function
-        if is_call {
-            for unsafe_func in &unsafe_functions {
-                if node_name == *unsafe_func {
-                    // Mark this call as unsafe
-                    graph[node_idx].kind = NodeType::UnsafeCall;
-                }
-            }
-        }
+        // Determine shape and color based on node type
+        let (shape, color, style) = match node.kind {
+            NodeType::UnsafeCall => ("ellipse", "red", "filled"),
+            NodeType::Call => ("ellipse", "orange", "filled"),
+            NodeType::Main => ("ellipse", "green", "filled"),
+            NodeType::Function => ("ellipse", "lightblue", "filled"),
+            NodeType::BasicBlock => ("box", "yellow", "filled,rounded"),
+            NodeType::Parameter => ("ellipse", "purple", "filled"),
+            NodeType::BufferParameter => ("ellipse", "blue", "filled"),
+            NodeType::Variable => ("ellipse", "orange", "filled"),
+            NodeType::IfStatement => ("diamond", "lightgreen", "filled"),
+            NodeType::ForLoop => ("box", "lightblue", "filled,rounded"),
+            NodeType::WhileLoop => ("box", "lightblue", "filled,rounded"),
+        };
+        
+        output.push_str(&format!("    {} [label=\"{}\", shape={}, fillcolor=\"{}\", style=\"{}\"];\n", 
+                                node_id, node.name, shape, color, style));
     }
+    
+    // Add edges with labels
+    for edge_idx in graph.edge_indices() {
+        let (source, target) = graph.edge_endpoints(edge_idx).unwrap();
+        let source_id = source.index();
+        let target_id = target.index();
+        let edge = &graph[edge_idx];
+        
+        // Edge label based on type
+        let label = match edge.kind {
+            EdgeType::Calls => "calls",
+            EdgeType::Contains => "contains",
+            EdgeType::Uses => "uses",
+            EdgeType::Defines => "defines",
+            EdgeType::Controls => "controls",
+        };
+        
+        // Edge color based on type
+        let color = match edge.kind {
+            EdgeType::Calls => "blue",
+            EdgeType::Contains => "gray",
+            EdgeType::Uses => "green",
+            EdgeType::Defines => "purple",
+            EdgeType::Controls => "red",
+        };
+        
+        output.push_str(&format!("    {} -> {} [label=\"{}\", color=\"{}\"];\n", 
+                                source_id, target_id, label, color));
+    }
+    
+    output.push_str("}\n");
+    output
 }
 
-fn get_entity_location(entity: &Entity) -> Option<String> {
-    if let Some(location) = entity.get_location() {
-        let file = location.get_file_location();
-        let line = file.line;
-        let column = file.column;
-        Some(format!("{}:{}", line, column))
-    } else {
-        None
-    }
-}
-
-// Format the graph as JSON that matches the sample format
 fn format_graph_as_json(graph: &DiGraph<Node, Edge>) -> String {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
@@ -306,18 +711,6 @@ fn format_graph_as_json(graph: &DiGraph<Node, Edge>) -> String {
         let node_id = format!("{}_{}", node_type_to_prefix(&node.kind), node_idx.index());
         node_id_map.insert(node_idx, node_id.clone());
         
-        // Create node label based on type
-        let label = match node.kind {
-            NodeType::Call => format!("Call: {}", node.name),
-            NodeType::UnsafeCall => format!("⚠️ Unsafe: {}", node.name),
-            NodeType::Parameter => format!("Param: {} (int)", node.name),
-            NodeType::BufferParam => format!("BufferParam: {} (char *) [buffer parameter]", node.name),
-            NodeType::BasicBlock => format!("BasicBlock: {}", node.name),
-            NodeType::Variable => format!("Var: {}", node.name),
-            NodeType::Main => node.name.clone(),
-            NodeType::Function => node.name.clone(),
-        };
-        
         // Map node type to group
         let group = match node.kind {
             NodeType::Function => "function",
@@ -326,13 +719,16 @@ fn format_graph_as_json(graph: &DiGraph<Node, Edge>) -> String {
             NodeType::Parameter => "param",
             NodeType::Call => "call",
             NodeType::UnsafeCall => "unsafe_call",
-            NodeType::BufferParam => "buffer_param",
+            NodeType::BufferParameter => "buffer_param",
             NodeType::BasicBlock => "basic",
+            NodeType::IfStatement => "if_statement",
+            NodeType::ForLoop => "for_loop",
+            NodeType::WhileLoop => "while_loop",
         };
         
         nodes.push(json!({
             "id": node_id,
-            "label": label,
+            "label": node.name,
             "group": group
         }));
     }
@@ -375,87 +771,16 @@ fn format_graph_as_json(graph: &DiGraph<Node, Edge>) -> String {
 // Helper function to map node types to ID prefixes
 fn node_type_to_prefix(node_type: &NodeType) -> &'static str {
     match node_type {
-        NodeType::Function => "block",
-        NodeType::Main => "block",
+        NodeType::Function => "func",
+        NodeType::Main => "main",
         NodeType::Variable => "var",
-        NodeType::Parameter => "var_param",
+        NodeType::Parameter => "param",
         NodeType::Call => "call",
-        NodeType::UnsafeCall => "call",
-        NodeType::BufferParam => "var_param",
+        NodeType::UnsafeCall => "unsafe",
+        NodeType::BufferParameter => "buffer",
         NodeType::BasicBlock => "block",
+        NodeType::IfStatement => "if",
+        NodeType::ForLoop => "for",
+        NodeType::WhileLoop => "while",
     }
-}
-
-// Output the graph in DOT format with custom formatting (original function preserved)
-fn format_graph_as_dot(graph: &DiGraph<Node, Edge>, simplified: bool) -> String {
-    let mut output = String::from("digraph {\n");
-    
-    // Add global styling
-    output.push_str("    // Graph styling\n");
-    output.push_str("    graph [fontname=\"Arial\", rankdir=TB, splines=true];\n");
-    output.push_str("    edge [fontname=\"Arial\"];\n\n");
-    
-    // Add nodes with different shapes based on type
-    for node_idx in graph.node_indices() {
-        let node = &graph[node_idx];
-        let node_id = node_idx.index();
-        
-        // Determine shape and color based on node type
-        let (shape, color, style) = match node.kind {
-            NodeType::UnsafeCall => ("ellipse", "red", "filled"),
-            NodeType::Call => ("ellipse", "orange", "filled"),
-            NodeType::Main => ("ellipse", "green", "filled"),
-            NodeType::Function => ("ellipse", "lightblue", "filled"),
-            NodeType::BasicBlock => ("box", "yellow", "filled,rounded"),
-            NodeType::Parameter => ("ellipse", "purple", "filled"),
-            NodeType::BufferParam => ("ellipse", "blue", "filled"),
-            NodeType::Variable => ("ellipse", "purple", "filled"),
-        };
-        
-        // Format label based on node type
-        let label = match node.kind {
-            NodeType::Call => format!("Call: {}", node.name),
-            NodeType::UnsafeCall => format!("Unsafe: {}", node.name),
-            NodeType::Parameter => format!("Param: {} (int)", node.name),
-            NodeType::BufferParam => format!("BufferParam: {} (char *) [buffer parameter]", node.name),
-            NodeType::BasicBlock => format!("BasicBlock: {}", node.name),
-            NodeType::Variable => format!("Var: {}", node.name),
-            _ => node.name.clone(),
-        };
-        
-        output.push_str(&format!("    {} [label=\"{}\", shape={}, fillcolor=\"{}\", style=\"{}\"];\n", 
-                                node_id, label, shape, color, style));
-    }
-    
-    // Add edges with labels
-    for edge_idx in graph.edge_indices() {
-        let (source, target) = graph.edge_endpoints(edge_idx).unwrap();
-        let source_id = source.index();
-        let target_id = target.index();
-        let edge = &graph[edge_idx];
-        
-        // Edge label based on type
-        let label = match edge.kind {
-            EdgeType::Calls => "calls",
-            EdgeType::Contains => "contains",
-            EdgeType::Uses => "uses",
-            EdgeType::Defines => "defines",
-            EdgeType::Controls => "controls",
-        };
-        
-        // Edge color based on type
-        let color = match edge.kind {
-            EdgeType::Calls => "blue",
-            EdgeType::Contains => "gray",
-            EdgeType::Uses => "green",
-            EdgeType::Defines => "purple",
-            EdgeType::Controls => "red",
-        };
-        
-        output.push_str(&format!("    {} -> {} [label=\"{}\", color=\"{}\"];\n", 
-                                source_id, target_id, label, color));
-    }
-    
-    output.push_str("}\n");
-    output
 }

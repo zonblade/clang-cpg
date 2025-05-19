@@ -7,127 +7,196 @@
     <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/vis/4.21.0/vis.min.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/vis/4.21.0/vis.min.css" rel="stylesheet" type="text/css" />
     <style>
+        :root {
+            --primary-color: #4361ee;
+            --background-color: #f8f9fa;
+            --card-background: #ffffff;
+            --border-color: #e9ecef;
+            --text-color: #212529;
+            --text-secondary: #6c757d;
+        }
+
         body, html {
             margin: 0;
             padding: 0;
             height: 100%;
             width: 100%;
-            font-family: Arial, sans-serif;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background-color: var(--background-color);
+            color: var(--text-color);
         }
+
         #container {
             display: flex;
             flex-direction: column;
             height: 100%;
         }
+
         #header {
-            padding: 10px;
-            background-color: #f0f0f0;
-            border-bottom: 1px solid #ddd;
+            padding: 16px 24px;
+            background-color: var(--card-background);
+            border-bottom: 1px solid var(--border-color);
             display: flex;
             justify-content: space-between;
             align-items: center;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
         }
+
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin: 0;
+        }
+
         #graph-container {
-            flex-grow: 1;
-            position: relative;
+            flex: 1 1 auto;   /* allow grow and shrink */
+            min-height: 0;    /* override the default min-content behavior */
+            overflow: hidden; /* or overflow: auto if you want scrollbars */
         }
+
         #mynetwork {
             width: 100%;
             height: 100%;
-            border: 1px solid #ddd;
-            background-color: #f9f9f9;
+            background-color: var(--background-color);
         }
+
         #legend {
             position: absolute;
-            top: 10px;
-            right: 10px;
-            background-color: rgba(255, 255, 255, 0.9);
-            border: 1px solid #ddd;
-            padding: 10px;
-            border-radius: 5px;
+            top: 84px;
+            right: 16px;
+            background-color: var(--card-background);
+            border: 1px solid var(--border-color);
+            padding: 12px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
             z-index: 1000;
+            max-height: 0;
+            overflow: hidden;
+            opacity: 0;
+            transition: max-height 0.3s ease, opacity 0.3s ease, padding 0.3s ease;
         }
+
+        #legend.visible {
+            max-height: 400px;
+            opacity: 1;
+            padding: 16px;
+        }
+
+        #legend h3 {
+            margin-top: 0;
+            margin-bottom: 12px;
+            font-size: 0.9rem;
+            font-weight: 600;
+        }
+
         .legend-item {
             display: flex;
             align-items: center;
-            margin-bottom: 5px;
+            margin-bottom: 8px;
+            font-size: 0.85rem;
         }
+
         .legend-color {
-            width: 15px;
-            height: 15px;
-            margin-right: 5px;
+            width: 12px;
+            height: 12px;
+            margin-right: 8px;
             border-radius: 3px;
         }
+
         #loading {
             position: absolute;
             top: 50%;
             left: 50%;
             transform: translate(-50%, -50%);
-            font-size: 24px;
-            color: #666;
+            font-size: 1rem;
+            color: var(--text-secondary);
+            background-color: var(--card-background);
+            padding: 16px 24px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
         }
+
         .controls {
             display: flex;
-            gap: 10px;
+            gap: 8px;
         }
+
         button {
-            padding: 5px 10px;
-            background-color: #4CAF50;
-            color: white;
-            border: none;
-            border-radius: 4px;
+            padding: 8px 16px;
+            background-color: var(--card-background);
+            color: var(--text-color);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
             cursor: pointer;
+            font-size: 0.85rem;
+            font-weight: 500;
+            transition: all 0.2s ease;
         }
+
         button:hover {
-            background-color: #45a049;
+            background-color: var(--background-color);
+            border-color: var(--text-secondary);
+        }
+        
+        button.active {
+            background-color: var(--primary-color);
+            color: white;
+            border-color: var(--primary-color);
+        }
+        
+        .legend-toggle {
+            display: flex;
+            align-items: center;
+            margin-right: 8px;
         }
     </style>
 </head>
 <body>
     <div id="container">
         <div id="header">
-            <h1>C Code Vulnerability Analysis</h1>
+            <h1>C Code Analysis</h1>
             <div class="controls">
+                <button id="legend-btn">Toggle Legend</button>
                 <button id="fit-btn">Fit View</button>
                 <button id="physics-btn">Toggle Physics</button>
-                <button id="hierarchical-btn">Toggle Hierarchical Layout</button>
+                <button id="hierarchical-btn">Hierarchical Layout</button>
             </div>
         </div>
         <div id="graph-container">
             <div id="mynetwork"></div>
-            <div id="loading">Loading graph data...</div>
+            <div id="loading">Loading visualization...</div>
             <div id="legend">
-                <h3>Legend</h3>
+                <h3>Graph Legend</h3>
                 <div class="legend-item">
-                    <div class="legend-color" style="background-color: #97C2FC;"></div>
+                    <div class="legend-color" style="background-color: #4361ee;"></div>
                     <span>Function</span>
                 </div>
                 <div class="legend-item">
-                    <div class="legend-color" style="background-color: #7BE141;"></div>
+                    <div class="legend-color" style="background-color: #3a0ca3;"></div>
                     <span>Main Function</span>
                 </div>
                 <div class="legend-item">
-                    <div class="legend-color" style="background-color: #FF9900;"></div>
+                    <div class="legend-color" style="background-color: #4cc9f0;"></div>
                     <span>Function Call</span>
                 </div>
                 <div class="legend-item">
-                    <div class="legend-color" style="background-color: #FF0000;"></div>
+                    <div class="legend-color" style="background-color: #f72585;"></div>
                     <span>Unsafe Call</span>
                 </div>
                 <div class="legend-item">
-                    <div class="legend-color" style="background-color: #6E6EFD;"></div>
+                    <div class="legend-color" style="background-color: #7209b7;"></div>
                     <span>Buffer Parameter</span>
                 </div>
                 <div class="legend-item">
-                    <div class="legend-color" style="background-color: #C2FABC;"></div>
+                    <div class="legend-color" style="background-color: #4895ef;"></div>
                     <span>Parameter</span>
                 </div>
                 <div class="legend-item">
-                    <div class="legend-color" style="background-color: #FFA807;"></div>
+                    <div class="legend-color" style="background-color: #560bad;"></div>
                     <span>Variable</span>
                 </div>
                 <div class="legend-item">
-                    <div class="legend-color" style="background-color: #FFFF00;"></div>
+                    <div class="legend-color" style="background-color: #f77f00;"></div>
                     <span>Basic Block</span>
                 </div>
             </div>
@@ -140,46 +209,56 @@
             // Create a network
             const container = document.getElementById('mynetwork');
             const loadingElement = document.getElementById('loading');
+            const legendElement = document.getElementById('legend');
+            const legendBtn = document.getElementById('legend-btn');
+            const physicsBtn = document.getElementById('physics-btn');
+            const hierarchicalBtn = document.getElementById('hierarchical-btn');
+            
+            // Toggle legend visibility
+            legendBtn.addEventListener('click', () => {
+                legendElement.classList.toggle('visible');
+                legendBtn.classList.toggle('active');
+            });
             
             // Node and edge styling based on groups
             const nodeStyles = {
                 function: { 
-                    color: { background: '#97C2FC', border: '#2B7CE9' }, 
+                    color: { background: '#4361ee', border: '#3a0ca3' }, 
                     shape: 'ellipse',
-                    font: { color: '#000000' }
+                    font: { color: '#ffffff' }
                 },
                 main_function: { 
-                    color: { background: '#7BE141', border: '#31B404' }, 
+                    color: { background: '#3a0ca3', border: '#240046' }, 
                     shape: 'ellipse',
-                    font: { color: '#000000', bold: true }
+                    font: { color: '#ffffff', bold: true }
                 },
                 call: { 
-                    color: { background: '#FF9900', border: '#E67E00' }, 
+                    color: { background: '#4cc9f0', border: '#4895ef' }, 
                     shape: 'ellipse',
                     font: { color: '#000000' }
                 },
                 unsafe_call: { 
-                    color: { background: '#FF0000', border: '#CC0000' }, 
+                    color: { background: '#f72585', border: '#b5179e' }, 
                     shape: 'ellipse',
-                    font: { color: '#000000', bold: true }
+                    font: { color: '#ffffff', bold: true }
                 },
                 buffer_param: { 
-                    color: { background: '#6E6EFD', border: '#4747D1' }, 
+                    color: { background: '#7209b7', border: '#560bad' }, 
                     shape: 'ellipse',
-                    font: { color: '#000000' }
+                    font: { color: '#ffffff' }
                 },
                 param: { 
-                    color: { background: '#C2FABC', border: '#74D66A' }, 
+                    color: { background: '#4895ef', border: '#4361ee' }, 
                     shape: 'ellipse',
                     font: { color: '#000000' }
                 },
                 variable: { 
-                    color: { background: '#FFA807', border: '#E69500' }, 
+                    color: { background: '#560bad', border: '#3a0ca3' }, 
                     shape: 'ellipse',
-                    font: { color: '#000000' }
+                    font: { color: '#ffffff' }
                 },
                 basic: { 
-                    color: { background: '#FFFF00', border: '#D1BE00' }, 
+                    color: { background: '#f77f00', border: '#d62828' }, 
                     shape: 'box',
                     font: { color: '#000000' }
                 }
@@ -188,35 +267,41 @@
             // Network options
             const options = {
                 nodes: {
-                    borderWidth: 2,
-                    size: 30,
-                    font: {
-                        size: 14,
-                        face: 'Arial',
-                        align: 'center'
-                    },
-                    shadow: true
-                },
-                edges: {
-                    width: 2,
+                    borderWidth: 1,
+                    size: 25,
                     font: {
                         size: 12,
-                        face: 'Arial',
-                        align: 'middle'
+                        face: 'Inter, system-ui, sans-serif',
+                    },
+                    shadow: false
+                },
+                edges: {
+                    width: 1.5,
+                    font: {
+                        size: 11,
+                        face: 'Inter, system-ui, sans-serif',
+                    },
+                    color: {
+                        color: '#6c757d',
+                        highlight: '#4361ee'
                     },
                     arrows: {
-                        to: { enabled: true, scaleFactor: 1 }
+                        to: { enabled: true, scaleFactor: 0.8 }
                     },
-                    shadow: true
+                    shadow: false,
+                    smooth: {
+                        type: 'continuous',
+                        roundness: 0.5
+                    }
                 },
                 physics: {
                     enabled: true,
                     solver: 'forceAtlas2Based',
                     forceAtlas2Based: {
-                        gravitationalConstant: -100,
+                        gravitationalConstant: -80,
                         centralGravity: 0.01,
-                        springLength: 100,
-                        springConstant: 0.08
+                        springLength: 80,
+                        springConstant: 0.06
                     },
                     stabilization: {
                         enabled: true,
@@ -230,11 +315,12 @@
                 interaction: {
                     hover: true,
                     tooltipDelay: 300,
-                    navigationButtons: true,
+                    navigationButtons: false,
                     keyboard: {
                         enabled: true,
                         speed: { x: 10, y: 10, zoom: 0.1 }
-                    }
+                    },
+                    zoomView: true
                 }
             };
 
@@ -272,16 +358,41 @@
                     // Hide loading indicator once the network is ready
                     network.on("stabilizationIterationsDone", function() {
                         loadingElement.style.display = "none";
+                        // Auto-show legend on load
+                        legendElement.classList.add('visible');
+                        legendBtn.classList.add('active');
+                        
+                        // Stop physics after initial stabilization to prevent drift/zoom
+                        setTimeout(() => {
+                            network.setOptions({ physics: { enabled: false } });
+                            physicsBtn.classList.remove('active');
+                            physicsEnabled = false;
+                        }, 1000);
+                    });
+                    
+                    // Fix zoom stability issues
+                    network.on("animationFinished", function() {
+                        network.setOptions({ physics: { enabled: false } });
+                    });
+                    
+                    // Prevent automatic zooming caused by physics
+                    network.on("zoom", function() {
+                        if (network.getScale() < 0.3) {
+                            network.moveTo({ scale: 0.3 });
+                        }
                     });
 
                     // Setup buttons
                     document.getElementById('fit-btn').addEventListener('click', () => {
-                        network.fit({ animation: true });
+                        network.fit({ animation: { duration: 800, easingFunction: 'easeInOutCubic' } });
                     });
 
+                    let physicsEnabled = false;
                     document.getElementById('physics-btn').addEventListener('click', () => {
-                        options.physics.enabled = !options.physics.enabled;
+                        physicsEnabled = !physicsEnabled;
+                        options.physics.enabled = physicsEnabled;
                         network.setOptions({ physics: options.physics });
+                        physicsBtn.classList.toggle('active', physicsEnabled);
                     });
 
                     let hierarchicalLayout = false;
@@ -292,15 +403,17 @@
                                 hierarchical: {
                                     direction: 'UD',
                                     sortMethod: 'directed',
-                                    nodeSpacing: 150,
-                                    treeSpacing: 200
+                                    nodeSpacing: 120,
+                                    treeSpacing: 160
                                 }
                             };
+                            hierarchicalBtn.classList.add('active');
                         } else {
                             options.layout = {
                                 improvedLayout: true,
                                 hierarchical: false
                             };
+                            hierarchicalBtn.classList.remove('active');
                         }
                         network.setOptions({ layout: options.layout });
                     });
@@ -319,7 +432,7 @@
                                 if (id === nodeId || connectedNodes.includes(id)) {
                                     return { id, opacity: 1 };
                                 } else {
-                                    return { id, opacity: 0.3 };
+                                    return { id, opacity: 0.2 };
                                 }
                             });
                             
@@ -336,8 +449,8 @@
                 })
                 .catch(error => {
                     console.error('Error loading the graph data:', error);
-                    loadingElement.textContent = 'Error loading graph data. See console for details.';
-                    loadingElement.style.color = 'red';
+                    loadingElement.textContent = 'Error loading graph data';
+                    loadingElement.style.color = '#dc3545';
                 });
         });
     </script>
