@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>C Code Analysis Visualization</title>
+    <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/vis/4.21.0/vis.min.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/vis/4.21.0/vis.min.css" rel="stylesheet" type="text/css" />
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            width: 100%;
+            font-family: Arial, sans-serif;
+        }
+        #container {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+        }
+        #header {
+            padding: 10px;
+            background-color: #f0f0f0;
+            border-bottom: 1px solid #ddd;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        #graph-container {
+            flex-grow: 1;
+            position: relative;
+        }
+        #mynetwork {
+            width: 100%;
+            height: 100%;
+            border: 1px solid #ddd;
+            background-color: #f9f9f9;
+        }
+        #legend {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background-color: rgba(255, 255, 255, 0.9);
+            border: 1px solid #ddd;
+            padding: 10px;
+            border-radius: 5px;
+            z-index: 1000;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 5px;
+        }
+        .legend-color {
+            width: 15px;
+            height: 15px;
+            margin-right: 5px;
+            border-radius: 3px;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 24px;
+            color: #666;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+        }
+        button {
+            padding: 5px 10px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="header">
+            <h1>C Code Vulnerability Analysis</h1>
+            <div class="controls">
+                <button id="fit-btn">Fit View</button>
+                <button id="physics-btn">Toggle Physics</button>
+                <button id="hierarchical-btn">Toggle Hierarchical Layout</button>
+            </div>
+        </div>
+        <div id="graph-container">
+            <div id="mynetwork"></div>
+            <div id="loading">Loading graph data...</div>
+            <div id="legend">
+                <h3>Legend</h3>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: #97C2FC;"></div>
+                    <span>Function</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: #7BE141;"></div>
+                    <span>Main Function</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: #FF9900;"></div>
+                    <span>Function Call</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: #FF0000;"></div>
+                    <span>Unsafe Call</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: #6E6EFD;"></div>
+                    <span>Buffer Parameter</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: #C2FABC;"></div>
+                    <span>Parameter</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: #FFA807;"></div>
+                    <span>Variable</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: #FFFF00;"></div>
+                    <span>Basic Block</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="text/javascript">
+        // Wait for document to be fully loaded
+        document.addEventListener('DOMContentLoaded', function() {
+            // Create a network
+            const container = document.getElementById('mynetwork');
+            const loadingElement = document.getElementById('loading');
+            
+            // Node and edge styling based on groups
+            const nodeStyles = {
+                function: { 
+                    color: { background: '#97C2FC', border: '#2B7CE9' }, 
+                    shape: 'ellipse',
+                    font: { color: '#000000' }
+                },
+                main_function: { 
+                    color: { background: '#7BE141', border: '#31B404' }, 
+                    shape: 'ellipse',
+                    font: { color: '#000000', bold: true }
+                },
+                call: { 
+                    color: { background: '#FF9900', border: '#E67E00' }, 
+                    shape: 'ellipse',
+                    font: { color: '#000000' }
+                },
+                unsafe_call: { 
+                    color: { background: '#FF0000', border: '#CC0000' }, 
+                    shape: 'ellipse',
+                    font: { color: '#000000', bold: true }
+                },
+                buffer_param: { 
+                    color: { background: '#6E6EFD', border: '#4747D1' }, 
+                    shape: 'ellipse',
+                    font: { color: '#000000' }
+                },
+                param: { 
+                    color: { background: '#C2FABC', border: '#74D66A' }, 
+                    shape: 'ellipse',
+                    font: { color: '#000000' }
+                },
+                variable: { 
+                    color: { background: '#FFA807', border: '#E69500' }, 
+                    shape: 'ellipse',
+                    font: { color: '#000000' }
+                },
+                basic: { 
+                    color: { background: '#FFFF00', border: '#D1BE00' }, 
+                    shape: 'box',
+                    font: { color: '#000000' }
+                }
+            };
+
+            // Network options
+            const options = {
+                nodes: {
+                    borderWidth: 2,
+                    size: 30,
+                    font: {
+                        size: 14,
+                        face: 'Arial',
+                        align: 'center'
+                    },
+                    shadow: true
+                },
+                edges: {
+                    width: 2,
+                    font: {
+                        size: 12,
+                        face: 'Arial',
+                        align: 'middle'
+                    },
+                    arrows: {
+                        to: { enabled: true, scaleFactor: 1 }
+                    },
+                    shadow: true
+                },
+                physics: {
+                    enabled: true,
+                    solver: 'forceAtlas2Based',
+                    forceAtlas2Based: {
+                        gravitationalConstant: -100,
+                        centralGravity: 0.01,
+                        springLength: 100,
+                        springConstant: 0.08
+                    },
+                    stabilization: {
+                        enabled: true,
+                        iterations: 1000,
+                        fit: true
+                    }
+                },
+                layout: {
+                    improvedLayout: true
+                },
+                interaction: {
+                    hover: true,
+                    tooltipDelay: 300,
+                    navigationButtons: true,
+                    keyboard: {
+                        enabled: true,
+                        speed: { x: 10, y: 10, zoom: 0.1 }
+                    }
+                }
+            };
+
+            // Fetch graph data
+            fetch('graph.json')
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! Status: ${response.status}`);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    console.log('Graph data loaded:', data);
+                    
+                    // Apply styling to nodes based on their group
+                    data.nodes.forEach(node => {
+                        const style = nodeStyles[node.group] || nodeStyles.function;
+                        Object.assign(node, style);
+                    });
+
+                    // Create vis.js data structure
+                    const nodes = new vis.DataSet(data.nodes);
+                    const edges = new vis.DataSet(data.edges);
+                    
+                    const graphData = {
+                        nodes: nodes,
+                        edges: edges
+                    };
+
+                    console.log('Creating network with:', graphData, options);
+                    
+                    // Initialize network
+                    const network = new vis.Network(container, graphData, options);
+
+                    // Hide loading indicator once the network is ready
+                    network.on("stabilizationIterationsDone", function() {
+                        loadingElement.style.display = "none";
+                    });
+
+                    // Setup buttons
+                    document.getElementById('fit-btn').addEventListener('click', () => {
+                        network.fit({ animation: true });
+                    });
+
+                    document.getElementById('physics-btn').addEventListener('click', () => {
+                        options.physics.enabled = !options.physics.enabled;
+                        network.setOptions({ physics: options.physics });
+                    });
+
+                    let hierarchicalLayout = false;
+                    document.getElementById('hierarchical-btn').addEventListener('click', () => {
+                        hierarchicalLayout = !hierarchicalLayout;
+                        if (hierarchicalLayout) {
+                            options.layout = {
+                                hierarchical: {
+                                    direction: 'UD',
+                                    sortMethod: 'directed',
+                                    nodeSpacing: 150,
+                                    treeSpacing: 200
+                                }
+                            };
+                        } else {
+                            options.layout = {
+                                improvedLayout: true,
+                                hierarchical: false
+                            };
+                        }
+                        network.setOptions({ layout: options.layout });
+                    });
+
+                    // Add double-click event to highlight connected nodes
+                    network.on("doubleClick", function(params) {
+                        if (params.nodes.length > 0) {
+                            const nodeId = params.nodes[0];
+                            const connectedNodes = network.getConnectedNodes(nodeId);
+                            
+                            // Get all node ids
+                            const allNodeIds = data.nodes.map(node => node.id);
+                            
+                            // Gray out non-connected nodes
+                            const updatedNodes = allNodeIds.map(id => {
+                                if (id === nodeId || connectedNodes.includes(id)) {
+                                    return { id, opacity: 1 };
+                                } else {
+                                    return { id, opacity: 0.3 };
+                                }
+                            });
+                            
+                            nodes.update(updatedNodes);
+                        } else {
+                            // Reset all nodes to full opacity
+                            const allNodeIds = data.nodes.map(node => node.id);
+                            const updatedNodes = allNodeIds.map(id => {
+                                return { id, opacity: 1 };
+                            });
+                            nodes.update(updatedNodes);
+                        }
+                    });
+                })
+                .catch(error => {
+                    console.error('Error loading the graph data:', error);
+                    loadingElement.textContent = 'Error loading graph data. See console for details.';
+                    loadingElement.style.color = 'red';
+                });
+        });
+    </script>
+</body>
+</html>
