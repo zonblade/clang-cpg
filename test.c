@@ -2,55 +2,54 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_LEN 64
+#define BASE_PATH "./files/"
+#define MAX_FILENAME 256
 
-void overflow_func(char *input) {
-    char buf[32];
-    // Stack buffer overflow: no bounds check on strcpy
-    strcpy(buf, input);
-    printf("Buffer content: %s\n", buf);
+// Rejects filename if it contains "..", starts with '/', or is absolute path
+int isValidFilename(const char *filename) {
+    if (strstr(filename, "..") != NULL) {
+        return 0;
+    }
+    if (filename[0] == '/') {
+        return 0;
+    }
+#ifdef _WIN32
+    if (strstr(filename, ":") != NULL) { // prevent C:\ paths on Windows
+        return 0;
+    }
+#endif
+    return 1;
 }
 
-void format_string_func(char *user_format) {
-    char greeting[128] = "Hello, ";
-    // Uncontrolled format string: user can add format specifiers
-    printf(user_format);  
-    printf("\n");
-}
+void readFile(const char *filename) {
+    char fullPath[512];
 
-char* integer_overflow_alloc(size_t count, size_t size) {
-    // Possible integer overflow if count * size wraps
-    size_t total = count * size;
-    char *p = malloc(total);
-    if (!p) exit(1);
-    return p;
-}
+    if (!isValidFilename(filename)) {
+        printf("Invalid filename: path traversal detected.\n");
+        return;
+    }
 
-void improper_input_func(char *data) {
-    // Improper input validation: assumes data is numeric
-    int num = atoi(data);
-    printf("Number is %d\n", num);
-}
+    snprintf(fullPath, sizeof(fullPath), "%s%s", BASE_PATH, filename);
 
-void uaf_and_double_free() {
-    char *ptr = malloc(16);
-    free(ptr);
-    // Use-after-free: ptr is still used
-    printf("Freed data: %s\n", ptr);
-    // Double-free: freeing twice
-    free(ptr);
+    FILE *fp = fopen(fullPath, "r");
+    if (fp == NULL) {
+        perror("Error opening file");
+        return;
+    }
+
+    char ch;
+    while ((ch = fgetc(fp)) != EOF) {
+        putchar(ch);
+    }
+    fclose(fp);
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        printf("Usage: %s <input>\n", argv[0]);
+    if (argc != 2) {
+        printf("Usage: %s <filename>\n", argv[0]);
         return 1;
     }
-    overflow_func(argv[1]);
-    format_string_func(argv[1]);
-    char *buf = integer_overflow_alloc(1 << 31, sizeof(int));
-    improper_input_func(argv[1]);
-    uaf_and_double_free();
-    free(buf);
+
+    readFile(argv[1]);
     return 0;
 }
